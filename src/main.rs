@@ -1,14 +1,19 @@
 //! hyprsticky: minimal sticky notes for Hyprland.
 //! A plain Wayland client that draws into shared memory with the CPU: no GPU, no toolkit.
-//! Each note is one window and one markdown file.
+//! Each note is one window and one markdown file; images stay files next to the notes.
 
+mod clip;
 mod font;
+mod img;
 mod layout;
 mod md;
 mod store;
 mod text;
 
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -45,6 +50,7 @@ use smithay_client_toolkit::{
 };
 
 use font::{Bitmap, Fonts};
+use img::{Image, Images};
 use layout::Layout;
 use md::Style;
 use store::APP_ID;
@@ -59,13 +65,18 @@ const FONT_PX: f32 = 16.0;
 /// Space between the window edge and the text, in logical pixels.
 const MARGIN: f32 = 10.0;
 
-const PAPER: [u8; 3] = [254, 255, 156];
-const INK: [u8; 3] = [10,10,10];
-const DIM: [u8; 3] = [150, 135, 60];
+/// Note colors: name, paper and selection. The dot in a note's corner steps through them.
+const COLORS: [(&str, [u8; 3], [u8; 3]); 6] = [
+    ("yellow", [254, 255, 156], [240, 196, 48]),
+    ("pink", [255, 196, 214], [240, 140, 175]),
+    ("blue", [178, 225, 255], [110, 180, 235]),
+    ("green", [196, 240, 170], [130, 205, 110]),
+    ("orange", [255, 207, 150], [240, 160, 70]),
+    ("purple", [221, 204, 255], [175, 150, 235]),
+];
+const INK: [u8; 3] = [10, 10, 10];
 const LINK: [u8; 3] = [25, 75, 170];
 const CODE: [u8; 3] = [120, 40, 20];
-const QUOTE: [u8; 3] = [100, 90, 40];
-const SELECTION: [u8; 3] = [240, 196, 48];
 
 /// Save this long after the last edit...
 const SAVE_PAUSE: Duration = Duration::from_secs(2);
@@ -93,6 +104,22 @@ impl Canvas<'_> {
         }
     }
 
+    /// Blends premultiplied BGRA pixels over the existing ones, with the corner at (x, y).
+    fn blit(&mut self, im: &Image, x: i32, y: i32) {
+        for (row, py) in im.bgra.chunks(im.w * 4).zip(y..) {
+            for (src, px) in row.chunks(4).zip(x..) {
+                if py < 0 || py >= self.h || px < 0 || px >= self.w {
+                    continue;
+                }
+                let o = ((py * self.w + px) * 4) as usize;
+                for k in 0..3 {
+                    let dst = self.data[o + k] as u32;
+                    self.data[o + k] = (src[k] as u32 + dst * (255 - src[3] as u32) / 255) as u8;
+                }
+            }
+        }
+    }
+
     /// Blends a glyph's coverage mask over the existing pixels.
     fn blend_glyph(&mut self, g: &Bitmap, x: i32, y: i32, c: [u8; 3]) {
         for (gy, row) in g.cov.chunks(g.w as usize).enumerate() {
@@ -112,25 +139,32 @@ impl Canvas<'_> {
     }
 }
 
-fn color(st: Style) -> [u8; 3] {
+/// Text color of a style on `paper`; markup and quotes are the ink faded towards the paper.
+fn ink(st: Style, paper: [u8; 3]) -> [u8; 3] {
+    let fade = |t: u16| -> [u8; 3] {
+        std::array::from_fn(|i| ((INK[i] as u16 * (4 - t) + paper[i] as u16 * t) / 4) as u8)
+    };
     if st.dim {
-        DIM
+        fade(2)
     } else if st.link {
         LINK
     } else if st.mono {
         CODE
     } else if st.quote {
-        QUOTE
+        fade(1)
     } else {
         INK
     }
 }
 
-/// Draws the whole note. `s` is the buffer scale; `scroll_y` is in buffer pixels.
+/// Draws the whole note. `s` is the buffer scale; `scroll_y` is in buffer pixels; `color`
+/// indexes `COLORS`.
 fn render(
-    cv: &mut Canvas, s: f32, editor: &Editor, layout: &Layout, fonts: &mut Fonts, scroll_y: f32,
+    cv: &mut Canvas, s: f32, editor: &Editor, layout: &Layout, fonts: &mut Fonts, images: &Images,
+    scroll_y: f32, color: usize,
 ) {
-    cv.fill(0, 0, cv.w, cv.h, PAPER);
+    let (_, paper, selection) = COLORS[color];
+    cv.fill(0, 0, cv.w, cv.h, paper);
     let chars = editor.chars();
     if layout.text_end() != chars.len() {
         return; // layout is stale; it is rebuilt before the next draw
@@ -152,7 +186,7 @@ fn render(
                 line.end < chars.len() && !layout.is_wrapped(l) && a <= line.end && b > line.end;
             let x1 = x(b) + if newline { fonts.advance(' ', line.style) } else { 0.0 };
             if x1 > x(a) {
-                cv.fill(x(a).round() as i32, y0, x1.round() as i32, y1, SELECTION);
+                cv.fill(x(a).round() as i32, y0, x1.round() as i32, y1, selection);
             }
         }
 
@@ -161,12 +195,15 @@ fn render(
             let st = layout.styles[line.start + col];
             let x0 = (margin + line.xs[col]).round() as i32;
             if let Some(g) = fonts.glyph(c, st) {
-                cv.blend_glyph(g, x0 + g.left, base_y + g.top, color(st));
+                cv.blend_glyph(g, x0 + g.left, base_y + g.top, ink(st, paper));
             }
             if st.strike {
                 let x1 = (margin + line.xs[col + 1]).round() as i32;
-                cv.fill(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2 + s as i32, color(st));
+                cv.fill(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2 + s as i32, ink(st, paper));
             }
+        }
+        if let Some(image) = line.img.as_deref().and_then(|src| images.cached(src)) {
+            cv.blit(image, margin.round() as i32, y1);
         }
     }
 
@@ -176,6 +213,12 @@ fn render(
     let x = (margin + line.xs[col]).round() as i32;
     let top = (margin + line.y - scroll_y).round() as i32;
     cv.fill(x, top, x + s as i32, top + line.h as i32, INK);
+
+    // The color button in the corner shows the color a click switches to.
+    let u = s as i32;
+    let edge = ink(Style { dim: true, ..Style::default() }, paper);
+    cv.fill(cv.w - 11 * u, u, cv.w - u, 11 * u, edge);
+    cv.fill(cv.w - 10 * u, 2 * u, cv.w - 2 * u, 10 * u, COLORS[(color + 1) % COLORS.len()].1);
 }
 
 struct Repeat {
@@ -213,9 +256,14 @@ struct App {
 
     // The note.
     path: std::path::PathBuf,
+    /// The note file's front matter, which holds the color; the editor never shows it.
+    front: String,
+    /// Index into `COLORS`.
+    color: usize,
     editor: Editor,
     layout: Layout,
     fonts: Fonts,
+    images: Images,
     scroll_y: f32,
     goal_x: Option<f32>,
     dirty_since: Option<Instant>,
@@ -239,7 +287,7 @@ impl App {
         let s = self.scale as f32;
         self.fonts.set_px(FONT_PX * s);
         let max_w = ((self.width as f32 - 2.0 * MARGIN) * s).max(1.0);
-        self.layout = Layout::build(self.editor.chars(), max_w, &mut self.fonts);
+        self.layout = Layout::build(self.editor.chars(), max_w, &mut self.fonts, &mut self.images);
     }
 
     fn view_height(&self) -> f32 {
@@ -271,7 +319,7 @@ impl App {
     // ---- saving ----
 
     fn save_now(&mut self) {
-        store::write_note(&self.path, &self.editor.text());
+        store::write_note(&self.path, &self.front, &self.editor.text());
         self.dirty_since = None;
     }
 
@@ -399,6 +447,8 @@ impl App {
                 Some('a') => self.editor.select_range(0, usize::MAX),
                 Some('z') if !shift => self.editor.undo(),
                 Some('z' | 'y') => self.editor.redo(),
+                Some(c @ ('c' | 'x')) => self.copy(c == 'x'),
+                Some('v') => self.paste(),
                 _ => {}
             },
             _ if !(ctrl || alt || logo) => {
@@ -420,6 +470,27 @@ impl App {
         }
     }
 
+    /// Ctrl+C / Ctrl+X: puts the selection on the clipboard, and removes it when cutting.
+    fn copy(&mut self, cut: bool) {
+        if let Some((a, b)) = self.editor.selection() {
+            clip::copy(&self.editor.chars()[a..b].iter().collect::<String>());
+            if cut {
+                self.editor.backspace(false);
+            }
+        }
+    }
+
+    /// Ctrl+V: inserts the clipboard text; an image goes on a line of its own.
+    fn paste(&mut self) {
+        let mut text = clip::paste(self.path.parent().unwrap_or(Path::new(".")));
+        if text.starts_with("![") {
+            let at = self.editor.selection().map_or(self.editor.cursor(), |(a, _)| a);
+            let line_start = at == 0 || self.editor.chars()[at - 1] == '\n';
+            text = format!("{}{text}\n", if line_start { "" } else { "\n" });
+        }
+        self.editor.insert(&text);
+    }
+
     // ---- mouse ----
 
     /// The cursor position nearest to the mouse pointer.
@@ -437,6 +508,12 @@ impl App {
     }
 
     fn mouse_press(&mut self, time: u32) {
+        // The corner button switches to the next color, saved with the note.
+        if self.mouse.0 >= self.width as f64 - 12.0 && self.mouse.1 < 12.0 {
+            self.color = (self.color + 1) % COLORS.len();
+            self.front = store::front_set(&self.front, "color", COLORS[self.color].0);
+            return self.after_edit();
+        }
         // A click ends any composition (before the click position is looked up).
         self.clear_composition();
         let idx = self.hit_index();
@@ -480,7 +557,17 @@ impl App {
             }
         };
         let mut cv = Canvas { data: canvas, w: bw, h: bh };
-        render(&mut cv, s as f32, &self.editor, &self.layout, &mut self.fonts, self.scroll_y);
+        let (editor, layout, images) = (&self.editor, &self.layout, &self.images);
+        render(
+            &mut cv,
+            s as f32,
+            editor,
+            layout,
+            &mut self.fonts,
+            images,
+            self.scroll_y,
+            self.color,
+        );
 
         // Tell the input method where the caret is, so its candidate list appears next to it.
         if let Some(text_input) = self.text_input.as_ref().filter(|_| self.ime_active) {
@@ -777,6 +864,7 @@ fn main() {
                  usage:\n  \
                  hyprsticky           open a new, empty note\n  \
                  hyprsticky <name>    open (or create) the note with that name\n  \
+                 hyprsticky last      reopen the note saved last\n  \
                  hyprsticky list      list saved notes, newest first\n\n\
                  environment:\n  \
                  HYPRSTICKY_DIR   folder where notes are stored (default ~/.local/share/hyprsticky)\n  \
@@ -787,10 +875,17 @@ fn main() {
     }
 
     // No argument: a brand-new, empty note. With a name: open (or create) that note.
-    let id = arg.map(|n| store::clean_name(&n)).filter(|n| !n.is_empty());
-    let id = id.unwrap_or_else(|| store::new_note_id(&dir));
+    let id = if matches!(arg.as_deref(), Some("last" | "--last")) {
+        store::last_note(&dir).unwrap_or_else(|| die("last", "there are no saved notes yet"))
+    } else {
+        let name = arg.map(|n| store::clean_name(&n)).filter(|n| !n.is_empty());
+        name.unwrap_or_else(|| store::unused_stem(&dir, store::EXT))
+    };
     let path = store::note_path(&dir, &id);
-    let mut editor = Editor::new(&std::fs::read_to_string(&path).unwrap_or_default());
+    let file = std::fs::read_to_string(&path).unwrap_or_default();
+    let (front, body) = store::split_front(&file);
+    let color = COLORS.iter().position(|c| Some(c.0) == store::front_get(front, "color"));
+    let mut editor = Editor::new(body);
     editor.set_cursor(usize::MAX, false);
 
     let font_spec = std::env::var("HYPRSTICKY_FONT").unwrap_or_default();
@@ -841,9 +936,12 @@ fn main() {
         needs_draw: false,
         exit: false,
         path,
+        front: front.to_string(),
+        color: color.unwrap_or(0),
         editor,
         layout: Layout::default(),
         fonts,
+        images: Images::new(&dir),
         scroll_y: 0.0,
         goal_x: None,
         dirty_since: None,

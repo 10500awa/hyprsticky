@@ -9,6 +9,8 @@ use std::{
 pub const APP_ID: &str = "hyprsticky";
 /// Notes are markdown files, so tools like Obsidian can open them.
 pub const EXT: &str = "md";
+/// Pasted and attached images are kept in this folder, next to the notes.
+const ATTACH_DIR: &str = "attachments";
 
 /// Where notes live: $HYPRSTICKY_DIR if set (e.g. a folder inside an Obsidian vault),
 /// otherwise ~/.local/share/hyprsticky (respects XDG_DATA_HOME).
@@ -32,21 +34,52 @@ pub fn clean_name(s: &str) -> String {
     joined.trim_matches('.').trim().to_string()
 }
 
-/// A fresh id for a new note: the current time in milliseconds.
-pub fn new_note_id(dir: &Path) -> String {
+/// A fresh file name without extension: the current time in milliseconds, unused in `dir`.
+pub fn unused_stem(dir: &Path, ext: &str) -> String {
     let mut n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    while dir.join(format!("{n}.{EXT}")).exists() {
+    while dir.join(format!("{n}.{ext}")).exists() {
         n += 1;
     }
     n.to_string()
+}
+
+/// Stores an image in the attachments folder; returns the markdown that shows it.
+pub fn attach(dir: &Path, ext: &str, data: &[u8]) -> Option<String> {
+    let folder = dir.join(ATTACH_DIR);
+    fs::create_dir_all(&folder).ok()?;
+    let name = format!("{}.{ext}", unused_stem(&folder, ext));
+    fs::write(folder.join(&name), data).ok()?;
+    Some(format!("![]({ATTACH_DIR}/{name})"))
 }
 
 pub fn note_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.{EXT}"))
 }
 
+/// Splits a note file into its front matter (`---` lines around `key: value` lines; it is kept
+/// as is and hidden from the editor) and the text.
+pub fn split_front(file: &str) -> (&str, &str) {
+    let end = file.strip_prefix("---\n").and_then(|r| r.find("\n---\n")).map_or(0, |i| i + 9);
+    file.split_at(end)
+}
+
+pub fn front_get<'a>(front: &'a str, key: &str) -> Option<&'a str> {
+    front.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(':')).map(str::trim)
+}
+
+/// The front matter with `key: value` set; its other lines are kept.
+pub fn front_set(front: &str, key: &str, value: &str) -> String {
+    let old = format!("{key}:");
+    let kept: String = front
+        .lines()
+        .filter(|l| *l != "---" && !l.starts_with(&old))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    format!("---\n{key}: {value}\n{kept}---\n")
+}
+
 /// Saves the note. An empty note leaves no file behind.
-pub fn write_note(path: &Path, text: &str) {
+pub fn write_note(path: &Path, front: &str, text: &str) {
     if text.is_empty() {
         let _ = fs::remove_file(path);
         return;
@@ -54,7 +87,7 @@ pub fn write_note(path: &Path, text: &str) {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if let Err(e) = fs::write(path, text) {
+    if let Err(e) = fs::write(path, format!("{front}{text}")) {
         eprintln!("{APP_ID}: could not save {}: {e}", path.display());
     }
 }
@@ -72,7 +105,7 @@ pub fn rename_to_title(path: &Path, text: &str) -> Option<PathBuf> {
     }
     let dir = path.parent()?;
 
-    let first_line = text.lines().find(|l| !l.trim().is_empty())?;
+    let first_line = text.lines().find(|l| !l.trim().is_empty() && !l.starts_with("!["))?;
     let raw: String = clean_name(first_line).chars().take(60).collect();
     let title = raw.trim_end_matches(['.', ' ']);
     if title.is_empty() {
@@ -89,8 +122,8 @@ pub fn rename_to_title(path: &Path, text: &str) -> Option<PathBuf> {
     Some(target)
 }
 
-/// Prints saved notes, newest first: id, then the first line.
-pub fn list_notes(dir: &Path) {
+/// Saved notes, newest first.
+fn notes(dir: &Path) -> Vec<PathBuf> {
     let mut notes: Vec<_> = fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -99,9 +132,24 @@ pub fn list_notes(dir: &Path) {
         .map(|e| (e.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH), e.path()))
         .collect();
     notes.sort_by(|a, b| b.cmp(a));
-    for (_, path) in notes {
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        let first_line: String = text.lines().next().unwrap_or("").chars().take(60).collect();
-        println!("{}\t{first_line}", path.file_stem().unwrap_or_default().to_string_lossy());
+    notes.into_iter().map(|(_, path)| path).collect()
+}
+
+fn id_of(path: &Path) -> String {
+    path.file_stem().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+/// Prints saved notes, newest first: id, then the first line.
+pub fn list_notes(dir: &Path) {
+    for path in notes(dir) {
+        let file = fs::read_to_string(&path).unwrap_or_default();
+        let first_line: String =
+            split_front(&file).1.lines().next().unwrap_or("").chars().take(60).collect();
+        println!("{}\t{first_line}", id_of(&path));
     }
+}
+
+/// The id of the note saved most recently.
+pub fn last_note(dir: &Path) -> Option<String> {
+    notes(dir).first().map(|path| id_of(path))
 }

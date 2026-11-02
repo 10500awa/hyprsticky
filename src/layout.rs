@@ -2,6 +2,7 @@
 
 use crate::{
     font::Fonts,
+    img::Images,
     md::{self, Style},
 };
 
@@ -17,9 +18,23 @@ pub struct Line {
     /// Top of the line and its height; headings make a line taller.
     pub y: f32,
     pub h: f32,
+    /// Room below the line for an image, and the image's path (the last line of a paragraph
+    /// that is just `![alt](path)`).
+    pub pad: f32,
+    pub img: Option<String>,
     /// Style of the first char, which sets the line's height and baseline.
     pub style: Style,
 }
+
+impl Line {
+    /// Bottom of the line, including the room for its image.
+    pub fn bottom(&self) -> f32 {
+        self.y + self.h + self.pad
+    }
+}
+
+/// Space between an image and what follows it, in pixels.
+const IMAGE_GAP: f32 = 6.0;
 
 #[derive(Default)]
 pub struct Layout {
@@ -32,6 +47,16 @@ pub struct Layout {
 /// have no spaces between words.
 fn break_after(c: char) -> bool {
     c == ' ' || c == '\t' || (c as u32) >= 0x2E80
+}
+
+/// The path of a paragraph that is just an image: `![alt](path)`.
+fn image_src(p: &[char]) -> Option<String> {
+    if p.first() != Some(&'!') {
+        return None;
+    }
+    let s: String = p.iter().collect();
+    let (_, path) = s.trim_end().strip_prefix("![")?.strip_suffix(')')?.split_once("](")?;
+    Some(path.trim_matches(['<', '>']).to_string())
 }
 
 fn wrap_paragraph(
@@ -70,13 +95,16 @@ fn wrap_paragraph(
 }
 
 impl Layout {
-    pub fn build(chars: &[char], max_width: f32, fonts: &mut Fonts) -> Layout {
+    pub fn build(chars: &[char], max_width: f32, fonts: &mut Fonts, images: &mut Images) -> Layout {
         let styles = md::styles(chars);
         let mut lines = Vec::new();
         let mut i = 0;
         loop {
             let p_end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
             wrap_paragraph(chars, &styles, (i, p_end), max_width, fonts, &mut lines);
+            if let (Some(src), Some(line)) = (image_src(&chars[i..p_end]), lines.last_mut()) {
+                line.img = Some(src);
+            }
             if p_end >= chars.len() {
                 break;
             }
@@ -85,20 +113,23 @@ impl Layout {
         let mut y = 0.0;
         for line in &mut lines {
             line.style = styles.get(line.start).copied().unwrap_or_default();
-            (line.y, line.h) = (y, fonts.metrics(line.style).0);
-            y += line.h;
+            line.h = fonts.metrics(line.style).0;
+            let image = line.img.as_deref().and_then(|src| images.get(src, max_width as u32));
+            line.pad = image.map_or(0.0, |image| image.h as f32 + IMAGE_GAP);
+            line.y = y;
+            y = line.bottom();
         }
         Layout { lines, styles }
     }
 
     /// Total height of the text.
     pub fn height(&self) -> f32 {
-        self.lines.last().map_or(0.0, |l| l.y + l.h)
+        self.lines.last().map_or(0.0, Line::bottom)
     }
 
     /// The line at vertical offset `y` (the first or last line when `y` is outside the text).
     pub fn line_at(&self, y: f32) -> usize {
-        self.lines.partition_point(|l| l.y + l.h <= y).min(self.lines.len() - 1)
+        self.lines.partition_point(|l| l.bottom() <= y).min(self.lines.len() - 1)
     }
 
     /// Index just past the last char of the text.

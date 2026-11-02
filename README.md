@@ -2,13 +2,15 @@
 
 Tiny sticky notes for Hyprland, written in Rust. (vibecoded of course)
 
-It uses about **4 MB** of ram just opened an about **50 MB** when a note has more than 1.5 Million characters.
+It uses about **4 MB** of ram just opened and about **50 MB** when a note has more than 1.5 Million characters. Each image in the open note adds a little.
 
 - Every launch opens a new, empty note.
 - Notes are plain markdown files in `~/.local/share/hyprsticky/`, saved automatically.
 - Works with input methods (fcitx, ibus) and shows Chinese, Japanese and Korean text.
 - Markdown is styled as you type: headings, bold, italic, strikethrough, code, links, quotes,
   lists, task lists and tables (monospace). The markers stay visible, dimmed.
+- Copy, cut and paste. Paste a screenshot (or copy an image file) and it shows in the note.
+- Six note colors: click the dot in the top right corner to change it.
 
 ## Install
 
@@ -18,10 +20,13 @@ cd hyprsticky
 cargo install --path .
 ```
 
+Copy and paste need [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
+
 ## Usage
 
 ```sh
 hyprsticky              # new note
+hyprsticky last         # reopen the last note
 hyprsticky list         # saved notes
 hyprsticky "Buy milk"   # reopen a note by name
 ```
@@ -29,8 +34,12 @@ hyprsticky "Buy milk"   # reopen a note by name
 `Esc` closes a note. Notes save a moment after you stop typing, and are renamed after their
 first line when closed.
 
-Keys: arrows, Home/End, Ctrl+arrows (by word), Ctrl+A, Ctrl+Z, Ctrl+Shift+Z.
+Keys: arrows, Home/End, Ctrl+arrows (by word), Ctrl+A, Ctrl+C/X/V, Ctrl+Z, Ctrl+Shift+Z.
 Mouse: click, drag to select, double-click for a word, triple-click for a line.
+
+Pasted images are saved in `attachments/` next to the notes and linked as
+`![](attachments/…)`, so Obsidian shows them too. The color is saved in the note's front matter
+(`color: pink`), which the note hides.
 
 ## Hyprland
 
@@ -60,15 +69,11 @@ Notes have no title bar, so move them with `SUPER` + drag. If a keybind can't fi
 
 ## Limitations
 
-No copy and paste yet. Images and links are shown as styled text, not opened or displayed.
+Only PNG images are drawn (other image links stay text). Links are not opened.
 
 ## Todo
 
-- Copy and paste.
-- Image support??
-- different note color (with an easy to change button).
 - Aur?
-- a command to re-open the last note.
 
 ## License
 
