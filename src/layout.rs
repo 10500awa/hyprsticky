@@ -18,8 +18,8 @@ pub struct Line {
     /// Top of the line and its height; headings make a line taller.
     pub y: f32,
     pub h: f32,
-    /// Room below the line for an image, and the image's path (the last line of a paragraph
-    /// that is just `![alt](path)`).
+    /// Room below the line for an image or formulas, and what to show there (set on the last
+    /// line of a paragraph): see `extra_src`.
     pub pad: f32,
     pub img: Option<String>,
     /// Style of the first char, which sets the line's height and baseline.
@@ -47,6 +47,15 @@ pub struct Layout {
 /// have no spaces between words.
 fn break_after(c: char) -> bool {
     c == ' ' || c == '\t' || (c as u32) >= 0x2E80
+}
+
+/// What a paragraph shows below its text: the path of an image if it is just `![alt](path)`, or
+/// `$` and the TeX of its formulas (see `Images::get`).
+fn extra_src(p: &[char]) -> Option<String> {
+    image_src(p).or_else(|| {
+        let formulas = md::formulas(p);
+        (!formulas.is_empty()).then(|| format!("${}", formulas.join(r" \qquad ")))
+    })
 }
 
 /// The path of a paragraph that is just an image: `![alt](path)`.
@@ -97,12 +106,13 @@ fn wrap_paragraph(
 impl Layout {
     pub fn build(chars: &[char], max_width: f32, fonts: &mut Fonts, images: &mut Images) -> Layout {
         let styles = md::styles(chars);
+        images.start();
         let mut lines = Vec::new();
         let mut i = 0;
         loop {
             let p_end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
             wrap_paragraph(chars, &styles, (i, p_end), max_width, fonts, &mut lines);
-            if let (Some(src), Some(line)) = (image_src(&chars[i..p_end]), lines.last_mut()) {
+            if let (Some(src), Some(line)) = (extra_src(&chars[i..p_end]), lines.last_mut()) {
                 line.img = Some(src);
             }
             if p_end >= chars.len() {
@@ -114,11 +124,13 @@ impl Layout {
         for line in &mut lines {
             line.style = styles.get(line.start).copied().unwrap_or_default();
             line.h = fonts.metrics(line.style).0;
-            let image = line.img.as_deref().and_then(|src| images.get(src, max_width as u32));
+            let width = max_width as u32;
+            let image = line.img.as_deref().and_then(|src| images.get(src, width, fonts));
             line.pad = image.map_or(0.0, |image| image.h as f32 + IMAGE_GAP);
             line.y = y;
             y = line.bottom();
         }
+        images.sweep();
         Layout { lines, styles }
     }
 

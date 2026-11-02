@@ -1,7 +1,8 @@
 //! Markdown styling. Every char of the note gets a `Style`; the text itself is never changed,
 //! so editing works on the raw markdown and the markers (`**`, `#`, ...) stay visible, dimmed.
 //! Supported: headings, bold, italic, strikethrough, inline and fenced code, links and images,
-//! block quotes, lists and task lists, rules, and tables (shown in monospace).
+//! block quotes, lists and task lists, rules, and tables (shown in monospace). Formulas
+//! (`$x^2$`, `$$\frac{a}{b}$$`) are left as typed; `formulas` finds them for drawing.
 
 #[derive(Clone, Copy, Default)]
 pub struct Style {
@@ -92,6 +93,40 @@ fn line(c: &[char], out: &mut [Style], fenced: &mut bool) {
     inline(c, start, n, st, out);
 }
 
+/// If a formula (`$..$` or `$$..$$`) starts at `i`, the index just past its closing `$`. As in
+/// Obsidian, a single `$` needs text right inside it and no digit after it (so "$5 and $6" is
+/// not a formula).
+fn math_end(c: &[char], i: usize, b: usize) -> Option<usize> {
+    let (n, delim) = if at(c, i, b, "$$") { (2, "$$") } else { (1, "$") };
+    let spaced = |j: usize| c[j].is_whitespace() && n == 1;
+    if i + n >= b || spaced(i + n) {
+        return None;
+    }
+    let close = |j: usize| {
+        at(c, j, b, delim)
+            && c[j - 1] != '\\'
+            && !spaced(j - 1)
+            && !(n == 1 && c.get(j + 1).is_some_and(|x| j + 1 < b && x.is_ascii_digit()))
+    };
+    (i + n + 1..b).find(|&j| close(j)).map(|j| j + n)
+}
+
+/// The TeX of each formula in a line of text.
+pub fn formulas(c: &[char]) -> Vec<String> {
+    let (mut i, mut out) = (0, Vec::new());
+    while i < c.len() {
+        match (c[i] == '$').then(|| math_end(c, i, c.len())).flatten() {
+            Some(j) => {
+                let n = if at(c, i, c.len(), "$$") { 2 } else { 1 };
+                out.push(c[i + n..j - n].iter().collect());
+                i = j;
+            }
+            None => i += 1 + (c[i] == '\\') as usize,
+        }
+    }
+    out
+}
+
 /// Styles `c[a..b]`: code, links, emphasis and strikethrough, nested to any depth.
 fn inline(c: &[char], a: usize, b: usize, st: Style, out: &mut [Style]) {
     let mut i = a;
@@ -125,6 +160,13 @@ fn span(c: &[char], i: usize, b: usize, st: Style, out: &mut [Style]) -> Option<
             inline(c, i + 1, j, Style { link: true, ..st }, out);
             out[j..=k].fill(Style { dim: true, link: true, ..st });
             return Some(k + 1);
+        }
+        '$' => {
+            let (j, n) = (math_end(c, i, b)?, if at(c, i, b, "$$") { 2 } else { 1 });
+            out[i..i + n].fill(dim);
+            out[j - n..j].fill(dim);
+            out[i + n..j - n].fill(st);
+            return Some(j);
         }
         'h' if at(c, i, b, "http://") || at(c, i, b, "https://") => {
             let end = (i..b).find(|&j| c[j].is_whitespace()).unwrap_or(b);

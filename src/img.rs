@@ -1,8 +1,12 @@
 //! Inline images. A PNG is decoded the first time a note shows it, scaled down to the note's
 //! width and kept as a small bitmap, so memory only grows with the images in the note (about
 //! width x height x 4 bytes each). The full-size pixels are held in an anonymous mapping that
-//! goes back to the system as soon as the scaling is done.
+//! goes back to the system as soon as the scaling is done. Formulas are drawn the same way.
 
+use crate::{
+    font::Fonts,
+    math::{self, Item},
+};
 use memmap2::MmapMut;
 use std::{
     collections::HashMap,
@@ -24,23 +28,41 @@ pub struct Images {
     dir: PathBuf,
     width: u32,
     cache: HashMap<String, Option<Image>>,
+    /// The previous layout's images, until this layout has claimed the ones it still shows.
+    old: HashMap<String, Option<Image>>,
 }
 
 impl Images {
     /// `dir` is the notes folder, which image paths in notes are relative to.
     pub fn new(dir: &Path) -> Images {
-        Images { dir: dir.to_path_buf(), width: 0, cache: HashMap::new() }
+        Images { dir: dir.to_path_buf(), width: 0, cache: HashMap::new(), old: HashMap::new() }
     }
 
-    /// The image at `src`, at most `width` pixels wide; loaded on first use. None if the file
-    /// is missing or not a PNG. Changing `width` drops every cached image.
-    pub fn get(&mut self, src: &str, width: u32) -> Option<&Image> {
+    /// Call before laying a note out, and `sweep` after: images the note no longer shows are
+    /// dropped (a formula being typed is a new image on every key).
+    pub fn start(&mut self) {
+        self.old = std::mem::take(&mut self.cache);
+    }
+
+    pub fn sweep(&mut self) {
+        self.old = HashMap::new();
+    }
+
+    /// The image at `src`, at most `width` pixels wide; made on first use. A `src` that starts
+    /// with `$` is a formula (TeX), anything else a PNG file: None if it is missing or not a
+    /// PNG. Changing `width` drops every cached image.
+    pub fn get(&mut self, src: &str, width: u32, fonts: &mut Fonts) -> Option<&Image> {
         if width != self.width {
-            (self.width, self.cache) = (width, HashMap::new());
+            (self.width, self.cache, self.old) = (width, HashMap::new(), HashMap::new());
         }
         let path = self.dir.join(src.replace("%20", " "));
-        let image =
-            self.cache.entry(src.to_string()).or_insert_with(|| load(&path, width as usize));
+        let old = self.old.remove(src);
+        let image = self.cache.entry(src.to_string()).or_insert_with(|| {
+            old.unwrap_or_else(|| match src.strip_prefix('$') {
+                Some(tex) => formula(tex, width as usize, fonts),
+                None => load(&path, width as usize),
+            })
+        });
         image.as_ref()
     }
 
@@ -48,6 +70,53 @@ impl Images {
     pub fn cached(&self, src: &str) -> Option<&Image> {
         self.cache.get(src)?.as_ref()
     }
+}
+
+/// Draws a formula in black, centred in `width` pixels and a little larger than the text; a
+/// formula wider than that is shrunk to fit.
+fn formula(tex: &str, width: usize, fonts: &mut Fonts) -> Option<Image> {
+    let em = fonts.px() * 1.2;
+    let mut set = |em: f32| {
+        math::typeset(tex, em, &mut |c, size, italic| {
+            fonts.advance_px(c, (italic as u8) << 1, size)
+        })
+    };
+    let mut m = set(em);
+    if m.w > width as f32 {
+        m = set(em * width as f32 / m.w);
+    }
+    let h = ((m.asc + m.desc).ceil() as usize + 2).min(4096);
+    if m.items.is_empty() || width == 0 {
+        return None;
+    }
+    let (x0, y0) = (((width as f32 - m.w) / 2.0).max(0.0), m.asc + 1.0);
+    let mut alpha = vec![0u8; width * h];
+    let mut dot = |x: i32, y: i32, a: u8| {
+        if (0..width as i32).contains(&x) && (0..h as i32).contains(&y) {
+            let p = &mut alpha[y as usize * width + x as usize];
+            *p = p.saturating_add(a);
+        }
+    };
+    for item in &m.items {
+        match *item {
+            Item::Glyph { c, x, y, size, italic } => {
+                let Some(g) = fonts.raster(c, (italic as u8) << 1, size) else { continue };
+                let (gx, gy) = ((x0 + x).round() as i32 + g.left, (y0 + y).round() as i32 + g.top);
+                for (k, &a) in g.cov.iter().enumerate() {
+                    dot(gx + (k as u32 % g.w) as i32, gy + (k as u32 / g.w) as i32, a);
+                }
+            }
+            Item::Rule { x, y, w, h: thick } => {
+                let (xa, ya) = ((x0 + x).round() as i32, (y0 + y).round() as i32);
+                let xb = ((x0 + x + w).round() as i32).max(xa + 1);
+                for py in ya..ya + (thick.round() as i32).max(1) {
+                    (xa..xb).for_each(|px| dot(px, py, 255));
+                }
+            }
+        }
+    }
+    let bgra = alpha.iter().flat_map(|&a| [0, 0, 0, a]).collect();
+    Some(Image { w: width, h, bgra })
 }
 
 fn load(path: &Path, width: usize) -> Option<Image> {

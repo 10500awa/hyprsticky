@@ -10,6 +10,8 @@ It uses about **4 MB** of ram just opened and about **50 MB** when a note has mo
 - Markdown is styled as you type: headings, bold, italic, strikethrough, code, links, quotes,
   lists, task lists and tables (monospace). The markers stay visible, dimmed.
 - Copy, cut and paste. Paste a screenshot (or copy an image file) and it shows in the note.
+- LaTeX math: `$x^2$` and `$$\frac{a}{b}$$` are drawn under their line (fractions, scripts,
+  roots, sums, integrals, brackets, matrices, Greek letters). The text stays as you typed it.
 - Six note colors: click the dot in the top right corner to change it.
 
 ## Install
@@ -69,7 +71,8 @@ Notes have no title bar, so move them with `SUPER` + drag. If a keybind can't fi
 
 ## Limitations
 
-Only PNG images are drawn (other image links stay text). Links are not opened.
+Only PNG images are drawn (other image links stay text). Links are not opened. A formula must
+be on one line, and only common TeX math is understood.
 
 ## Todo
 

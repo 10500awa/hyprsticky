@@ -6,6 +6,7 @@ mod clip;
 mod font;
 mod img;
 mod layout;
+mod math;
 mod md;
 mod store;
 mod text;

@@ -110,6 +110,11 @@ impl Fonts {
         }
     }
 
+    /// The body font size in pixels per em.
+    pub fn px(&self) -> f32 {
+        self.px
+    }
+
     /// Font size of a style in pixels per em.
     fn size(&self, st: Style) -> f32 {
         self.px * HEADING_SCALE[st.level as usize]
@@ -173,15 +178,20 @@ impl Fonts {
 
     /// Width of a character in pixels.
     pub fn advance(&mut self, c: char, st: Style) -> f32 {
+        self.advance_px(c, st.look(), self.size(st))
+    }
+
+    /// Width of a character at any size; `look` is as in `Style::look`.
+    pub fn advance_px(&mut self, c: char, look: u8, px: f32) -> f32 {
         if c == '\t' {
-            return 4.0 * self.advance(' ', st);
+            return 4.0 * self.advance_px(' ', look, px);
         }
         if c.is_control() {
             return 0.0;
         }
-        let i = self.face_index(c, st.look());
+        let i = self.face_index(c, look);
         let face = &self.faces[i];
-        face.as_scaled(pxscale(face, self.size(st))).h_advance(face.glyph_id(c))
+        face.as_scaled(pxscale(face, px)).h_advance(face.glyph_id(c))
     }
 
     /// The rasterized glyph for `c`, or None for characters with nothing to draw.
@@ -191,17 +201,17 @@ impl Fonts {
         }
         let key = (c, st.look());
         if !self.glyphs.contains_key(&key) {
-            let bitmap = self.rasterize(c, st);
+            let bitmap = self.raster(c, st.look(), self.size(st));
             self.glyphs.insert(key, bitmap);
         }
         self.glyphs[&key].as_ref()
     }
 
-    fn rasterize(&mut self, c: char, st: Style) -> Option<Bitmap> {
-        let i = self.face_index(c, st.look());
+    /// Rasterizes `c` at any size, without caching it.
+    pub fn raster(&mut self, c: char, look: u8, px: f32) -> Option<Bitmap> {
+        let i = self.face_index(c, look);
         let face = &self.faces[i];
-        let glyph =
-            face.glyph_id(c).with_scale_and_position(pxscale(face, self.size(st)), point(0.0, 0.0));
+        let glyph = face.glyph_id(c).with_scale_and_position(pxscale(face, px), point(0.0, 0.0));
         let outlined = face.outline_glyph(glyph)?;
         let bounds = outlined.px_bounds();
         let (w, h) = (bounds.width().ceil() as u32, bounds.height().ceil() as u32);
