@@ -22,8 +22,12 @@ pub struct Line {
     /// line of a paragraph): see `extra_src`.
     pub pad: f32,
     pub img: Option<String>,
-    /// Style of the first char, which sets the line's height and baseline.
+    /// Formulas shown inside the text of this line: where each starts, and what to show.
+    pub inline: Vec<(usize, String)>,
+    /// Style of the first char, which sets the line's height (with any inline formulas).
     pub style: Style,
+    /// Distance from the top of the line to its baseline.
+    pub base: f32,
 }
 
 impl Line {
@@ -41,21 +45,16 @@ pub struct Layout {
     pub lines: Vec<Line>,
     /// Markdown style of every char.
     pub styles: Vec<Style>,
+    /// Where every `$..$` formula starts and ends, and the start of the one being edited (the
+    /// cursor is inside it), which is shown as text rather than as a picture.
+    pub formulas: Vec<(usize, usize)>,
+    pub open: Option<usize>,
 }
 
 /// Can a line break after this character? After spaces, and after CJK characters, which
 /// have no spaces between words.
 fn break_after(c: char) -> bool {
     c == ' ' || c == '\t' || (c as u32) >= 0x2E80
-}
-
-/// What a paragraph shows below its text: the path of an image if it is just `![alt](path)`, or
-/// `$` and the TeX of its formulas (see `Images::get`).
-fn extra_src(p: &[char]) -> Option<String> {
-    image_src(p).or_else(|| {
-        let formulas = md::formulas(p);
-        (!formulas.is_empty()).then(|| format!("${}", formulas.join(r" \qquad ")))
-    })
 }
 
 /// The path of a paragraph that is just an image: `![alt](path)`.
@@ -68,9 +67,14 @@ fn image_src(p: &[char]) -> Option<String> {
     Some(path.trim_matches(['<', '>']).to_string())
 }
 
+/// A formula shown in a line: where it starts and ends, its width, and what to show.
+type Inline = (usize, usize, f32, String);
+
+/// Wraps one paragraph. A formula counts as one wide character at its start; its other
+/// characters have no width and cannot start a line.
 fn wrap_paragraph(
     chars: &[char], styles: &[Style], (s, e): (usize, usize), max_w: f32, fonts: &mut Fonts,
-    lines: &mut Vec<Line>,
+    inline: &[Inline], lines: &mut Vec<Line>,
 ) {
     let mut start = s;
     let mut xs = vec![0.0f32];
@@ -78,8 +82,13 @@ fn wrap_paragraph(
     let mut last_break: Option<usize> = None;
     let mut i = s;
     while i < e {
-        let w = fonts.advance(chars[i], styles[i]);
-        if x + w > max_w && i > start {
+        let hit = inline.iter().find(|f| f.0 <= i && i < f.1);
+        let w = match hit {
+            Some(f) if f.0 == i => f.2,
+            Some(_) => 0.0,
+            None => fonts.advance(chars[i], styles[i]),
+        };
+        if x + w > max_w && i > start && !matches!(hit, Some(f) if f.0 < i) {
             let brk = match last_break {
                 Some(b) if b > start => b,
                 _ => i,
@@ -96,7 +105,7 @@ fn wrap_paragraph(
         x += w;
         xs.push(x);
         i += 1;
-        if break_after(chars[i - 1]) {
+        if break_after(chars[i - 1]) && !styles[i - 1].hide {
             last_break = Some(i);
         }
     }
@@ -104,15 +113,55 @@ fn wrap_paragraph(
 }
 
 impl Layout {
-    pub fn build(chars: &[char], max_width: f32, fonts: &mut Fonts, images: &mut Images) -> Layout {
-        let styles = md::styles(chars);
+    /// Lays the text out. Formulas become pictures, except the one the `cursor` is inside.
+    pub fn build(
+        chars: &[char], max_width: f32, fonts: &mut Fonts, images: &mut Images, cursor: usize,
+    ) -> Layout {
+        let mut styles = md::styles(chars);
         images.start();
-        let mut lines = Vec::new();
+        let width = max_width as u32;
+        let (mut lines, mut formulas, mut open) = (Vec::new(), Vec::new(), None);
         let mut i = 0;
         loop {
             let p_end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
-            wrap_paragraph(chars, &styles, (i, p_end), max_width, fonts, &mut lines);
-            if let (Some(src), Some(line)) = (extra_src(&chars[i..p_end]), lines.last_mut()) {
+            let (mut display, mut inline) = (Vec::new(), Vec::new());
+            if chars[i..p_end].contains(&'$') {
+                for (a, b, tex, is_display) in md::formulas(&chars[i..p_end]) {
+                    let (a, b) = (i + a, i + b);
+                    // Only what the markdown styling recognized: not code, not tables.
+                    if !styles[a].dim || styles[a].mono {
+                        continue;
+                    }
+                    if is_display {
+                        display.push(tex);
+                        continue;
+                    }
+                    formulas.push((a, b));
+                    if a < cursor && cursor < b {
+                        open = Some(a);
+                        continue;
+                    }
+                    let src = format!("\u{1}{tex}");
+                    if let Some(w) = images.get(&src, width, fonts).map(|im| im.w as f32) {
+                        styles[a..b].iter_mut().for_each(|s| s.hide = true);
+                        inline.push((a, b, w, src));
+                    }
+                }
+            }
+            let first = lines.len();
+            wrap_paragraph(chars, &styles, (i, p_end), max_width, fonts, &inline, &mut lines);
+            for (a, _, _, src) in inline {
+                if let Some(line) = lines[first..].iter_mut().rev().find(|l| l.start <= a) {
+                    line.inline.push((a, src));
+                }
+            }
+            // Below the paragraph: its image (`![alt](path)`) or its `$$` formulas (a `src`
+            // that starts with `$`, see `Images::get`).
+            let shown = image_src(&chars[i..p_end]);
+            let shown = shown.or_else(|| {
+                (!display.is_empty()).then(|| format!("${}", display.join(r" \qquad ")))
+            });
+            if let (Some(src), Some(line)) = (shown, lines.last_mut()) {
                 line.img = Some(src);
             }
             if p_end >= chars.len() {
@@ -123,15 +172,21 @@ impl Layout {
         let mut y = 0.0;
         for line in &mut lines {
             line.style = styles.get(line.start).copied().unwrap_or_default();
-            line.h = fonts.metrics(line.style).0;
-            let width = max_width as u32;
+            let (height, base) = fonts.metrics(line.style);
+            let (mut up, mut down) = (base, height - base);
+            for (_, src) in &line.inline {
+                if let Some(im) = images.get(src, width, fonts) {
+                    (up, down) = (up.max(im.base as f32), down.max((im.h - im.base) as f32));
+                }
+            }
+            (line.base, line.h) = (up, up + down);
             let image = line.img.as_deref().and_then(|src| images.get(src, width, fonts));
             line.pad = image.map_or(0.0, |image| image.h as f32 + IMAGE_GAP);
             line.y = y;
             y = line.bottom();
         }
         images.sweep();
-        Layout { lines, styles }
+        Layout { lines, styles, formulas, open }
     }
 
     /// Total height of the text.
@@ -179,10 +234,29 @@ impl Layout {
     pub fn idx_at(&self, l: usize, x: f32) -> usize {
         let l = l.min(self.lines.len() - 1);
         let line = &self.lines[l];
+        // Of equally close positions the last wins, so a click on a formula lands after it.
         let col = (0..=self.max_col(l))
+            .rev()
             .min_by(|&a, &b| (line.xs[a] - x).abs().total_cmp(&(line.xs[b] - x).abs()))
             .unwrap_or(0);
         line.start + col
+    }
+
+    /// Where a click at `x` on line `l` lands on a formula picture: just inside the formula, so
+    /// that it opens for editing.
+    pub fn inside_at(&self, l: usize, x: f32) -> Option<usize> {
+        let line = &self.lines[l];
+        let shown = |f: &&(usize, usize)| line.inline.iter().any(|(a, _)| *a == f.0);
+        let span = |f: &&(usize, usize)| {
+            (line.xs[f.0 - line.start], line.xs[f.1.min(line.end) - line.start])
+        };
+        let hit = self.formulas.iter().filter(shown).find(|f| span(f).0 < x && x < span(f).1);
+        hit.map(|f| f.0 + 1)
+    }
+
+    /// The formula the cursor is inside (not just next to), as the index where it starts.
+    pub fn open_at(&self, cursor: usize) -> Option<usize> {
+        self.formulas.iter().find(|f| f.0 < cursor && cursor < f.1).map(|f| f.0)
     }
 
     pub fn line_start_idx(&self, idx: usize) -> usize {

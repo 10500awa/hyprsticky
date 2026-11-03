@@ -14,6 +14,8 @@ pub struct Style {
     pub dim: bool,
     pub link: bool,
     pub quote: bool,
+    /// Not drawn: the source of a formula that is shown as a picture instead.
+    pub hide: bool,
     /// Heading level 1 to 6, or 0 for body text.
     pub level: u8,
 }
@@ -111,14 +113,15 @@ fn math_end(c: &[char], i: usize, b: usize) -> Option<usize> {
     (i + n + 1..b).find(|&j| close(j)).map(|j| j + n)
 }
 
-/// The TeX of each formula in a line of text.
-pub fn formulas(c: &[char]) -> Vec<String> {
+/// The formulas in a line of text: where each starts and ends (just past the closing `$`), its
+/// TeX, and whether it is a `$$` display formula.
+pub fn formulas(c: &[char]) -> Vec<(usize, usize, String, bool)> {
     let (mut i, mut out) = (0, Vec::new());
     while i < c.len() {
         match (c[i] == '$').then(|| math_end(c, i, c.len())).flatten() {
             Some(j) => {
                 let n = if at(c, i, c.len(), "$$") { 2 } else { 1 };
-                out.push(c[i + n..j - n].iter().collect());
+                out.push((i, j, c[i + n..j - n].iter().collect(), n == 2));
                 i = j;
             }
             None => i += 1 + (c[i] == '\\') as usize,

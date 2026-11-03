@@ -191,9 +191,12 @@ fn render(
             }
         }
 
-        let base_y = y0 + fonts.metrics(line.style).1 as i32;
+        let base_y = y0 + line.base as i32;
         for (col, &c) in chars[line.start..line.end].iter().enumerate() {
             let st = layout.styles[line.start + col];
+            if st.hide {
+                continue;
+            }
             let x0 = (margin + line.xs[col]).round() as i32;
             if let Some(g) = fonts.glyph(c, st) {
                 cv.blend_glyph(g, x0 + g.left, base_y + g.top, ink(st, paper));
@@ -201,6 +204,12 @@ fn render(
             if st.strike {
                 let x1 = (margin + line.xs[col + 1]).round() as i32;
                 cv.fill(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2 + s as i32, ink(st, paper));
+            }
+        }
+        for (at, src) in &line.inline {
+            if let Some(image) = images.cached(src) {
+                let x = (margin + line.xs[at - line.start]).round() as i32;
+                cv.blit(image, x, base_y - image.base as i32);
             }
         }
         if let Some(image) = line.img.as_deref().and_then(|src| images.cached(src)) {
@@ -288,7 +297,17 @@ impl App {
         let s = self.scale as f32;
         self.fonts.set_px(FONT_PX * s);
         let max_w = ((self.width as f32 - 2.0 * MARGIN) * s).max(1.0);
-        self.layout = Layout::build(self.editor.chars(), max_w, &mut self.fonts, &mut self.images);
+        let cursor = self.editor.cursor();
+        self.layout =
+            Layout::build(self.editor.chars(), max_w, &mut self.fonts, &mut self.images, cursor);
+    }
+
+    /// A formula is text while the cursor is inside it and a picture otherwise: lay out again
+    /// when the cursor goes in or out of one.
+    fn sync_reveal(&mut self) {
+        if self.layout.open != self.layout.open_at(self.editor.cursor()) {
+            self.relayout();
+        }
     }
 
     fn view_height(&self) -> f32 {
@@ -466,6 +485,7 @@ impl App {
         if self.editor.version() != v0 {
             self.after_edit();
         } else {
+            self.sync_reveal();
             self.ensure_cursor_visible();
             self.needs_draw = true;
         }
@@ -494,15 +514,18 @@ impl App {
 
     // ---- mouse ----
 
-    /// The cursor position nearest to the mouse pointer.
-    fn hit_index(&self) -> usize {
+    /// The cursor position nearest to the mouse pointer. With `open`, a formula picture under
+    /// the pointer counts as a position inside it, which opens it for editing.
+    fn hit_index(&self, open: bool) -> usize {
         let s = self.scale as f32;
         let x = (self.mouse.0 as f32 - MARGIN) * s;
         let y = (self.mouse.1 as f32 - MARGIN) * s + self.scroll_y;
-        self.layout.idx_at(self.layout.line_at(y), x)
+        let l = self.layout.line_at(y);
+        self.layout.inside_at(l, x).filter(|_| open).unwrap_or_else(|| self.layout.idx_at(l, x))
     }
 
     fn cursor_moved(&mut self) {
+        self.sync_reveal();
         self.goal_x = None;
         self.ensure_cursor_visible();
         self.needs_draw = true;
@@ -517,7 +540,7 @@ impl App {
         }
         // A click ends any composition (before the click position is looked up).
         self.clear_composition();
-        let idx = self.hit_index();
+        let idx = self.hit_index(true);
         let close_to_last = self.last_click.is_some_and(|(t, p)| {
             time.wrapping_sub(t) < DOUBLE_CLICK_MS
                 && (p.0 - self.mouse.0).abs() < 6.0
@@ -760,7 +783,7 @@ impl PointerHandler for App {
             self.mouse = event.position;
             match event.kind {
                 PointerEventKind::Motion { .. } if self.dragging => {
-                    let idx = self.hit_index();
+                    let idx = self.hit_index(false);
                     self.editor.set_cursor(idx, true);
                     self.cursor_moved();
                 }

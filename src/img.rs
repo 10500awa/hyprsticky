@@ -21,6 +21,8 @@ const MAX_DECODED: usize = 64 << 20;
 pub struct Image {
     pub w: usize,
     pub h: usize,
+    /// The row of the text baseline, for a formula that sits in a line of text.
+    pub base: usize,
     pub bgra: Vec<u8>,
 }
 
@@ -49,8 +51,9 @@ impl Images {
     }
 
     /// The image at `src`, at most `width` pixels wide; made on first use. A `src` that starts
-    /// with `$` is a formula (TeX), anything else a PNG file: None if it is missing or not a
-    /// PNG. Changing `width` drops every cached image.
+    /// with `$` is a centred display formula (TeX), one that starts with `\u{1}` a formula as
+    /// wide as it is, for a line of text, anything else a PNG file: None if it is missing or not
+    /// a PNG. Changing `width` drops every cached image.
     pub fn get(&mut self, src: &str, width: u32, fonts: &mut Fonts) -> Option<&Image> {
         if width != self.width {
             (self.width, self.cache, self.old) = (width, HashMap::new(), HashMap::new());
@@ -58,9 +61,11 @@ impl Images {
         let path = self.dir.join(src.replace("%20", " "));
         let old = self.old.remove(src);
         let image = self.cache.entry(src.to_string()).or_insert_with(|| {
-            old.unwrap_or_else(|| match src.strip_prefix('$') {
-                Some(tex) => formula(tex, width as usize, fonts),
-                None => load(&path, width as usize),
+            old.unwrap_or_else(|| match src.chars().next() {
+                Some(c @ ('$' | '\u{1}')) => {
+                    formula(&src[1..], width as usize, fonts, c == '\u{1}')
+                }
+                _ => load(&path, width as usize),
             })
         });
         image.as_ref()
@@ -72,24 +77,27 @@ impl Images {
     }
 }
 
-/// Draws a formula in black, centred in `width` pixels and a little larger than the text; a
-/// formula wider than that is shrunk to fit.
-fn formula(tex: &str, width: usize, fonts: &mut Fonts) -> Option<Image> {
-    let em = fonts.px() * 1.2;
+/// Draws a formula in black; a formula wider than `width` pixels is shrunk to fit. An `inline`
+/// one is as wide as it is and as large as the text; a display one is a little larger and
+/// centred in `width`.
+fn formula(tex: &str, width: usize, fonts: &mut Fonts, inline: bool) -> Option<Image> {
+    let em = fonts.px() * if inline { 1.0 } else { 1.2 };
     let mut set = |em: f32| {
         math::typeset(tex, em, &mut |c, size, italic| {
             fonts.advance_px(c, (italic as u8) << 1, size)
         })
     };
     let mut m = set(em);
-    if m.w > width as f32 {
-        m = set(em * width as f32 / m.w);
+    let room = (width as f32 - if inline { 2.0 } else { 0.0 }).max(1.0);
+    if m.w > room {
+        m = set(em * room / m.w);
     }
     let h = ((m.asc + m.desc).ceil() as usize + 2).min(4096);
     if m.items.is_empty() || width == 0 {
         return None;
     }
-    let (x0, y0) = (((width as f32 - m.w) / 2.0).max(0.0), m.asc + 1.0);
+    let (x0, y0) = (if inline { 1.0 } else { ((width as f32 - m.w) / 2.0).max(0.0) }, m.asc + 1.0);
+    let width = if inline { m.w.ceil() as usize + 2 } else { width };
     let mut alpha = vec![0u8; width * h];
     let mut dot = |x: i32, y: i32, a: u8| {
         if (0..width as i32).contains(&x) && (0..h as i32).contains(&y) {
@@ -116,7 +124,7 @@ fn formula(tex: &str, width: usize, fonts: &mut Fonts) -> Option<Image> {
         }
     }
     let bgra = alpha.iter().flat_map(|&a| [0, 0, 0, a]).collect();
-    Some(Image { w: width, h, bgra })
+    Some(Image { w: width, h, base: y0.round() as usize, bgra })
 }
 
 fn load(path: &Path, width: usize) -> Option<Image> {
@@ -163,5 +171,5 @@ fn scale(buf: &[u8], (sw, sh): (usize, usize), stride: usize, ch: usize, width: 
             bgra.extend(sum.map(|s| (s / n) as u8));
         }
     }
-    Image { w, h, bgra }
+    Image { w, h, base: 0, bgra }
 }
