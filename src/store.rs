@@ -10,7 +10,7 @@ pub const APP_ID: &str = "hyprsticky";
 /// Notes are markdown files, so tools like Obsidian can open them.
 pub const EXT: &str = "md";
 /// Pasted and attached images are kept in this folder, next to the notes.
-const ATTACH_DIR: &str = "attachments";
+const ATTACH_DIR: &str = "";
 
 /// Where notes live: $HYPRSTICKY_DIR if set (e.g. a folder inside an Obsidian vault),
 /// otherwise ~/.local/share/hyprsticky (respects XDG_DATA_HOME).
