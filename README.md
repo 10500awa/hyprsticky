@@ -40,10 +40,6 @@ first line when closed.
 Keys: arrows, Home/End, Ctrl+arrows (by word), Ctrl+A, Ctrl+C/X/V, Ctrl+Z, Ctrl+Shift+Z.
 Mouse: click, drag to select, double-click for a word, triple-click for a line.
 
-Pasted images are saved in `attachments/` next to the notes and linked as
-`![](attachments/…)`, so Obsidian shows them too. The color is saved in the note's front matter
-(`color: pink`), which the note hides.
-
 ## Hyprland
 
 Bind:
